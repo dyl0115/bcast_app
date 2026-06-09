@@ -76,7 +76,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } catch (e) {
       setState(() {
         _isConnected = false;
-        _status = '연결 실패';
+        _status = '연결 실패: $e';
       });
     }
   }
