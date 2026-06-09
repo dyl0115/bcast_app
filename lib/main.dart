@@ -70,15 +70,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _status = '연결 중...';
     });
 
-    try {
-      await _player.setUrl(url);
-      await _player.play();
-    } catch (e) {
-      setState(() {
-        _isConnected = false;
-        _status = '연결 실패: $e';
-      });
+    while (_isConnected) {
+      try {
+        await _player.setUrl(url);
+        await _player.play();
+        return;
+      } catch (_) {
+        if (!_isConnected) break;
+        setState(() => _status = '방송 대기 중...');
+        await Future.delayed(const Duration(seconds: 3));
+      }
     }
+
+    setState(() {
+      _isConnected = false;
+      _status = '연결 안됨';
+    });
   }
 
   Future<void> _disconnect() async {
