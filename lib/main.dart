@@ -30,7 +30,7 @@ class PlayerScreen extends StatefulWidget {
 
 class _PlayerScreenState extends State<PlayerScreen> {
   final _player = AudioPlayer();
-  final _urlController = TextEditingController(text: 'http://192.168.0.1:8336/stream');
+  final _urlController = TextEditingController(text: 'https://doubledragon.duckdns.org/bcast/stream');
 
   bool _isConnected = false;
   bool _isBuffering = false;
