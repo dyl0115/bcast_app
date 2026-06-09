@@ -1,8 +1,126 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:audio_service/audio_service.dart';
 
-void main() {
+late BcastAudioHandler _audioHandler;
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  _audioHandler = await AudioService.init(
+    builder: () => BcastAudioHandler(),
+    config: AudioServiceConfig(
+      androidNotificationChannelId: 'com.dyl0115.bcast_app.audio',
+      androidNotificationChannelName: 'Bcast 라디오',
+      androidNotificationOngoing: true,
+      androidStopForegroundOnPause: false,
+    ),
+  );
   runApp(const BcastApp());
+}
+
+class BcastAudioHandler extends BaseAudioHandler {
+  final _player = AudioPlayer();
+  bool _shouldConnect = false;
+
+  static const _baseItem = MediaItem(
+    id: 'bcast_live',
+    title: 'Bcast',
+    artist: '연결 안됨',
+  );
+
+  BcastAudioHandler() {
+    mediaItem.add(_baseItem);
+    _player.playerStateStream.listen(_onPlayerState);
+  }
+
+  void _onPlayerState(PlayerState ps) {
+    if (ps.processingState == ProcessingState.idle) return;
+
+    if (ps.processingState == ProcessingState.completed) {
+      if (_shouldConnect) stop();
+      return;
+    }
+
+    final audioState = switch (ps.processingState) {
+      ProcessingState.loading => AudioProcessingState.loading,
+      ProcessingState.buffering => AudioProcessingState.buffering,
+      ProcessingState.ready => AudioProcessingState.ready,
+      _ => AudioProcessingState.idle,
+    };
+
+    final artist = switch ((ps.processingState, ps.playing)) {
+      (ProcessingState.loading, _) || (ProcessingState.buffering, _) => '버퍼링 중...',
+      (ProcessingState.ready, true) => '방송 수신 중',
+      (ProcessingState.ready, false) => '일시 정지',
+      _ => '연결 중...',
+    };
+
+    mediaItem.add(_baseItem.copyWith(artist: artist));
+    playbackState.add(playbackState.value.copyWith(
+      controls: [
+        if (ps.playing) MediaControl.pause else MediaControl.play,
+        MediaControl.stop,
+      ],
+      systemActions: const {MediaAction.play, MediaAction.pause, MediaAction.stop},
+      androidCompactActionIndices: const [0],
+      processingState: audioState,
+      playing: ps.playing,
+    ));
+  }
+
+  void _emitLoadingState(String artist) {
+    mediaItem.add(_baseItem.copyWith(artist: artist));
+    playbackState.add(playbackState.value.copyWith(
+      controls: [MediaControl.stop],
+      systemActions: const {MediaAction.stop},
+      androidCompactActionIndices: const [0],
+      processingState: AudioProcessingState.loading,
+      playing: false,
+    ));
+  }
+
+  Future<void> connectAndPlay(String url) async {
+    _shouldConnect = true;
+    _emitLoadingState('연결 중...');
+
+    while (_shouldConnect) {
+      try {
+        await _player.setUrl(url);
+        if (!_shouldConnect) break;
+        await _player.play();
+        return;
+      } catch (_) {
+        if (!_shouldConnect) break;
+        _emitLoadingState('방송 대기 중...');
+        await Future.delayed(const Duration(seconds: 3));
+      }
+    }
+  }
+
+  @override
+  Future<void> play() async {
+    if (_player.processingState == ProcessingState.ready) {
+      await _player.play();
+    }
+  }
+
+  @override
+  Future<void> pause() => stop();
+
+  @override
+  Future<void> stop() async {
+    _shouldConnect = false;
+    await _player.stop();
+    mediaItem.add(_baseItem.copyWith(artist: '연결 안됨'));
+    await super.stop();
+  }
+
+  @override
+  Future<void> onTaskRemoved() => stop();
+
+  @override
+  Future<void> onNotificationDeleted() => stop();
 }
 
 class BcastApp extends StatelessWidget {
@@ -29,76 +147,42 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  final _player = AudioPlayer();
-  final _urlController = TextEditingController(text: 'https://doubledragon.duckdns.org/bcast/stream');
+  final _urlController = TextEditingController(
+    text: 'https://doubledragon.duckdns.org/bcast/stream',
+  );
 
-  bool _isConnected = false;
-  bool _isBuffering = false;
-  String _status = '연결 안됨';
+  late StreamSubscription<PlaybackState> _stateSub;
+  late StreamSubscription<MediaItem?> _mediaSub;
+
+  AudioProcessingState _processingState = AudioProcessingState.idle;
+  String _statusText = '연결 안됨';
+
+  bool get _isConnected => _processingState != AudioProcessingState.idle;
+  bool get _isBuffering =>
+      _processingState == AudioProcessingState.loading ||
+      _processingState == AudioProcessingState.buffering;
 
   @override
   void initState() {
     super.initState();
-    _player.playerStateStream.listen(_onPlayerState);
-  }
-
-  void _onPlayerState(PlayerState state) {
-    setState(() {
-      switch (state.processingState) {
-        case ProcessingState.loading:
-        case ProcessingState.buffering:
-          _isBuffering = true;
-          _status = '버퍼링 중...';
-        case ProcessingState.ready:
-          _isBuffering = false;
-          _status = state.playing ? '방송 수신 중' : '일시 정지';
-        case ProcessingState.completed:
-        case ProcessingState.idle:
-          _isBuffering = false;
-          _isConnected = false;
-          _status = '연결 안됨';
-      }
+    _stateSub = _audioHandler.playbackState.listen((state) {
+      setState(() => _processingState = state.processingState);
+    });
+    _mediaSub = _audioHandler.mediaItem.listen((item) {
+      setState(() => _statusText = item?.artist ?? '연결 안됨');
     });
   }
 
-  Future<void> _connect() async {
+  void _connect() {
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
-
-    setState(() {
-      _isConnected = true;
-      _status = '연결 중...';
-    });
-
-    while (_isConnected) {
-      try {
-        await _player.setUrl(url);
-        await _player.play();
-        return;
-      } catch (_) {
-        if (!_isConnected) break;
-        setState(() => _status = '방송 대기 중...');
-        await Future.delayed(const Duration(seconds: 3));
-      }
-    }
-
-    setState(() {
-      _isConnected = false;
-      _status = '연결 안됨';
-    });
-  }
-
-  Future<void> _disconnect() async {
-    await _player.stop();
-    setState(() {
-      _isConnected = false;
-      _status = '연결 안됨';
-    });
+    _audioHandler.connectAndPlay(url);
   }
 
   @override
   void dispose() {
-    _player.dispose();
+    _stateSub.cancel();
+    _mediaSub.cancel();
     _urlController.dispose();
     super.dispose();
   }
@@ -120,7 +204,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             _StatusIcon(isConnected: _isConnected, isBuffering: _isBuffering),
             const SizedBox(height: 20),
             Text(
-              _status,
+              _statusText,
               style: TextStyle(
                 fontSize: 18,
                 color: _isConnected ? Colors.deepPurpleAccent : Colors.grey,
@@ -146,7 +230,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
-                onPressed: _isBuffering ? null : (_isConnected ? _disconnect : _connect),
+                onPressed: _isConnected ? _audioHandler.stop : _connect,
                 icon: Icon(_isConnected ? Icons.stop_rounded : Icons.play_arrow_rounded),
                 label: Text(
                   _isConnected ? '연결 끊기' : '수신 시작',
